@@ -72,14 +72,16 @@ class ServerState:
                 t.end_time = None
                 self._log(f"Stopped {t.name}")
 
-    def reset_timer(self, timer_id):
+    def restart_timer(self, timer_id):
+        """Resets the time to total_duration and starts the timer immediately."""
         with self._lock:
             t = self.timers.get(timer_id)
             if t:
                 t.remaining = t.total_duration
-                t.is_running = False
-                t.end_time = None
-                self._log(f"Reset {t.name}")
+                # Key change: Calculate new end time and set to running
+                t.end_time = datetime.now() + timedelta(seconds=t.total_duration)
+                t.is_running = True
+                self._log(f"Restarted {t.name}")
 
     def update_duration(self, timer_id, new_duration):
         with self._lock:
@@ -135,10 +137,8 @@ class ServerState:
                 return t.remaining, t.total_duration, False, False # not running, not finished
 
 # 2. Singleton Initialization
-# Renaming this function again forces Streamlit to create a new cache entry
-# and instantiate the NEW ServerState class, resolving caching issues.
 @st.cache_resource
-def get_shared_state_v5():
+def get_shared_state_v9(): # Bumped version for new features
     state = ServerState()
     # Initialize some default timers if they don't exist
     state.create_timer("t1", "Frames", 60) 
@@ -147,58 +147,44 @@ def get_shared_state_v5():
     state.create_timer("t4", "Plug Material", 60)
     return state
 
-# 3. Main App Logic
-def main():
-    st.set_page_config(page_title="Global Shared State", layout="centered")
-    
+# --- View Functions ---
+
+def format_time_str(rem):
+    """Formats seconds into MM:SS string."""
+    mins, secs = divmod(int(rem), 60)
+    return f"{mins:02d}:{secs:02d}"
+
+def standard_view(shared_state, timer_ids):
+    """The standard view with settings and controls."""
     st.title("🌐 Server-Wide Shared App")
     st.markdown("Open multiple tabs to see these values sync in real-time.")
-
-    # Call the V5 function to get the fresh instance
-    shared_state = get_shared_state_v5()
-    
-    # --- Check if we need to auto-refresh (animation loop) ---
-    any_timer_running = False
-    
-    # --- Section 1: Timers ---
     st.header("⏱️ Shared Timers")
     
-    timer_ids = ["t1", "t2", "t3", "t4"]
-    
-    # Create two primary columns to hold the timers side-by-side
     col_left, col_right = st.columns(2)
 
+    any_timer_running = False
+
     for i, tid in enumerate(timer_ids):
-        # Determine the target column: t1 and t2 go left (index 0, 1), t3 and t4 go right (index 2, 3)
         target_col = col_left if i < 2 else col_right
 
         with target_col:
-            # Get up-to-date values (thread-safe)
-            # We now unpack four values: rem, total, running, just_finished
             rem, total, running, just_finished = shared_state.update_and_get_timer(tid)
             name = shared_state.timers[tid].name
             
             if running:
-                any_timer_running = True
+                any_timer_running = True 
                 
-            # Display the toast notification immediately when a timer finishes
             if just_finished:
                 st.toast(f"✅ Timer '{name}' has completed and automatically restarted!", icon="🔄")
 
-            # Timer UI Card
             with st.container(border=True):
-                # Inner columns for metrics/progress vs. buttons
                 c1, c2 = st.columns([3, 1]) 
                 with c1:
                     st.subheader(f"{name}")
-                    # Format time as MM:SS
-                    mins, secs = divmod(int(rem), 60)
-                    time_str = f"{mins:02d}:{secs:02d}"
-                    # The metric delta shows the current status clearly
+                    time_str = format_time_str(rem)
+                    
                     st.metric("Time Remaining", time_str, delta="Running" if running else "Paused")
                     
-                    # Progress Bar
-                    # Avoid division by zero if duration is 0
                     if total > 0:
                         progress = max(0.0, min(1.0, rem / total))
                     else:
@@ -228,12 +214,11 @@ def main():
                             shared_state.start_timer(tid)
                             st.rerun()
                     
-                    # Moved Reset button down to align with the Start/Stop button
-                    if st.button("Reset", key=f"rst_{tid}", use_container_width=True):
-                        shared_state.reset_timer(tid)
+                    if st.button("Restart", key=f"rst_{tid}", use_container_width=True):
+                        shared_state.restart_timer(tid)
                         st.rerun()
-
-    # --- Section 2: Shared Counter (Preserved) ---
+                        
+    # --- Shared Counter & Logs ---
     st.divider()
     with st.expander("See Shared Counter & Logs"):
         st.header("Shared Counter")
@@ -255,11 +240,112 @@ def main():
         st.subheader("Activity Log")
         for log in reversed(shared_state.logs):
             st.text(log)
+            
+    return any_timer_running
 
+def full_screen_status_view(shared_state, timer_ids):
+    """
+    The consolidated view with standard size timer status.
+    Uses st.columns(4) for maximum consolidation (single row).
+    """
+    
+    # Custom CSS to hide Streamlit elements in Full Screen Mode
+    st.markdown("""
+        <style>
+        /* Hide the Streamlit header, footer, and main menu */
+        header { visibility: hidden; }
+        footer { visibility: hidden; }
+        .css-1d391kg { padding-top: 0rem; } 
+        /* Adjust padding for metrics in the consolidated view */
+        .stMetric { padding: 0.5rem !important; }
+        .stMetric > div:first-child { font-size: 1rem; }
+        .stMetric > div:nth-child(2) > div:first-child { font-size: 1.5rem; }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Use 4 columns for maximum consolidation (all in one row)
+    cols = st.columns(4)
+    
+    any_timer_running = False
+
+    for i, tid in enumerate(timer_ids):
+        target_col = cols[i]
+
+        with target_col:
+            rem, total, running, just_finished = shared_state.update_and_get_timer(tid)
+            name = shared_state.timers[tid].name
+            
+            if running:
+                any_timer_running = True
+                delta_label = "Running"
+                delta_color = "normal" 
+            else:
+                delta_label = "Paused"
+                delta_color = "inverse" # Inverse color (red) for paused status
+                
+            if just_finished:
+                st.toast(f"✅ Timer '{name}' has completed and automatically restarted!", icon="🔄")
+
+            time_str = format_time_str(rem)
+            
+            # Consolidated display using native Streamlit elements (standard size)
+            with st.container(border=True):
+                st.subheader(f"{name}", divider='gray')
+                
+                # Use st.metric for the standard size requested
+                st.metric(
+                    label="Time Remaining",
+                    value=time_str,
+                    delta=delta_label,
+                    delta_color=delta_color
+                )
+
+                # Progress Bar
+                if total > 0:
+                    progress = max(0.0, min(1.0, rem / total))
+                else:
+                    progress = 0.0
+                st.progress(progress)
+
+    return any_timer_running
+
+# 3. Main App Logic
+def main():
+    # Set initial view mode if not already set
+    if 'view_mode' not in st.session_state:
+        st.session_state.view_mode = "Standard View"
+        
+    # Configure page layout based on view mode
+    is_full_screen = st.session_state.view_mode == "Full Screen Status"
+    st.set_page_config(page_title="Global Shared Timers", 
+                       layout="wide" if is_full_screen else "centered", 
+                       initial_sidebar_state="collapsed" if is_full_screen else "auto")
+    
+    shared_state = get_shared_state_v9()
+    timer_ids = ["t1", "t2", "t3", "t4"]
+
+    # --- View Toggle Button (Replaces Sidebar Radio) ---
+    if is_full_screen:
+        # Show a small button to exit full screen
+        if st.button("⬅️ Exit Full Screen Status"):
+            st.session_state.view_mode = "Standard View"
+            st.rerun()
+    else:
+        # Show button to enter full screen
+        if st.button("➡️ Enter Full Screen Status"):
+            st.session_state.view_mode = "Full Screen Status"
+            st.rerun()
+        
+    # --- Render Selected View ---
+    if st.session_state.view_mode == "Standard View":
+        any_timer_running = standard_view(shared_state, timer_ids)
+    else:
+        # Full Screen view logic
+        any_timer_running = full_screen_status_view(shared_state, timer_ids)
+        
     # --- Animation Loop ---
-    # If a timer is running, we sleep briefly and rerun to update the progress bar.
     if any_timer_running:
-        # Sleep for less than a second to ensure smooth countdown animation
+        # Sleep briefly and rerun to update the progress bar.
         time.sleep(0.1) 
         st.rerun()
 
