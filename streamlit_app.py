@@ -94,7 +94,7 @@ class ServerState:
     def update_and_get_timer(self, timer_id):
         """
         Calculates the current state of the timer. 
-        If expired, auto-resets it inside the lock.
+        If expired, auto-restarts it inside the lock.
         Returns: (remaining_time, total_duration, is_running, just_finished) - ALWAYS 4 VALUES
         """
         with self._lock:
@@ -108,17 +108,29 @@ class ServerState:
                 remaining = (t.end_time - now).total_seconds()
                 
                 if remaining <= 0:
-                    # Timer Reached Zero: Reset automatically
-                    t.remaining = t.total_duration
-                    t.is_running = False
-                    t.end_time = None
-                    self._log(f"{t.name} finished and reset")
-                    # 4 values returned
-                    return t.total_duration, t.total_duration, False, True 
+                    # Timer Reached Zero: AUTO-RESTART LOGIC
+                    
+                    # 1. Flag that it just finished
+                    just_finished = True 
+                    
+                    # 2. Recalculate end_time for the new cycle (starts instantly)
+                    t.end_time = datetime.now() + timedelta(seconds=t.total_duration)
+                    t.remaining = t.total_duration # Resets the visible remaining time
+                    t.is_running = True # Remains running
+                    
+                    self._log(f"{t.name} finished and automatically restarted")
+                    
+                    # Recalculate remaining time for the *new* cycle (will be slightly less than total_duration)
+                    new_remaining = (t.end_time - datetime.now()).total_seconds() 
+                    
+                    # 4 values returned: new_remaining, total_duration, True (running), True (just finished)
+                    return new_remaining, t.total_duration, True, just_finished 
                 else:
+                    # Timer is actively running
                     # 4 values returned
                     return remaining, t.total_duration, True, False # running, not finished
             else:
+                # Timer is paused
                 # 4 values returned
                 return t.remaining, t.total_duration, False, False # not running, not finished
 
@@ -126,7 +138,7 @@ class ServerState:
 # Renaming this function again forces Streamlit to create a new cache entry
 # and instantiate the NEW ServerState class, resolving caching issues.
 @st.cache_resource
-def get_shared_state_v4():
+def get_shared_state_v5():
     state = ServerState()
     # Initialize some default timers if they don't exist
     state.create_timer("t1", "Frames", 60) 
@@ -142,8 +154,8 @@ def main():
     st.title("🌐 Server-Wide Shared App")
     st.markdown("Open multiple tabs to see these values sync in real-time.")
 
-    # Call the V4 function to get the fresh instance
-    shared_state = get_shared_state_v4()
+    # Call the V5 function to get the fresh instance
+    shared_state = get_shared_state_v5()
     
     # --- Check if we need to auto-refresh (animation loop) ---
     any_timer_running = False
@@ -171,7 +183,7 @@ def main():
                 
             # Display the toast notification immediately when a timer finishes
             if just_finished:
-                st.toast(f"✅ Timer '{name}' has completed and reset!", icon="🎉")
+                st.toast(f"✅ Timer '{name}' has completed and automatically restarted!", icon="🔄")
 
             # Timer UI Card
             with st.container(border=True):
