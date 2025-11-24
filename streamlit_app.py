@@ -1,336 +1,255 @@
 import streamlit as st
+import threading
 import time
+from datetime import datetime, timedelta
 
-# --- Configuration and Utility Functions ---
+# 1. Define the Timer structure and Server State
+class TimerData:
+    def __init__(self, name, duration):
+        self.name = name
+        self.total_duration = duration # The reset value (e.g., 60 seconds)
+        self.remaining = duration      # Current seconds left (e.g., 45.5)
+        self.end_time = None           # Timestamp when timer finishes (if running)
+        self.is_running = False
 
-# CSS for Full Screen Mode (Large Fonts)
-FULL_SCREEN_CSS = """
-<style>
-/* Target the main metric value (the time remaining) */
-div[data-testid="stMetricValue"] {
-    font-size: 5.5rem !important; /* Huge font for time */
-    font-weight: 900;
-    line-height: 1.1;
-}
-/* Target the metric label (the timer name) */
-div[data-testid="stMetricLabel"] {
-    font-size: 2.2rem !important; /* Large font for labels */
-    font-weight: 500;
-    opacity: 0.8;
-}
-/* Target the progress bar text/label */
-.stProgress > div > div > div {
-    font-size: 1.5rem !important;
-}
-/* Center and enlarge the main section header */
-h3 {
-    text-align: center;
-    font-size: 2.5rem !important;
-}
-</style>
-"""
-
-# Function to format total seconds into Minutes:Seconds string
-def format_time(seconds):
-    """Converts seconds into M:SS format."""
-    seconds = max(0, seconds)
-    mins = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{mins:01d}:{secs:02d}"
-
-# --- State Initialization ---
-
-def initialize_state():
-    """Sets up the initial state for the timers using absolute time tracking."""
-    
-    # 1. Timer Durations (Defaults)
-    if 'frame_duration' not in st.session_state:
-        st.session_state.frame_duration = 90.0
-    if 'twelve_duration' not in st.session_state:
-        st.session_state.twelve_duration = 60.0
-    
-    # 2. Absolute Start Time (Timestamp of when the timer was last reset/started)
-    # This is the key for robustness against background pauses.
-    if 'frame_start_time' not in st.session_state:
-        st.session_state.frame_start_time = time.time()
-    if 'twelve_start_time' not in st.session_state:
-        st.session_state.twelve_start_time = time.time()
-    
-    # 3. Cycle Counters (Calculated from start time, but stored for display)
-    if 'frame_cycles' not in st.session_state:
-        st.session_state.frame_cycles = 0
-    if 'twelve_cycles' not in st.session_state:
-        st.session_state.twelve_cycles = 0
-
-    # 4. Control Flags
-    if 'is_running' not in st.session_state:
-        st.session_state.is_running = True # Start running by default
-    if 'is_fullscreen' not in st.session_state:
-        st.session_state.is_fullscreen = False
-
-def calculate_time_state(timer_key):
-    """
-    Calculates remaining time, percentage, and cycles completed based on 
-    the absolute start time and duration.
-    """
-    duration = st.session_state[f'{timer_key}_duration']
-    start_time = st.session_state[f'{timer_key}_start_time']
-    
-    if not st.session_state.is_running:
-        # When paused, return the state as it was when paused
-        cycles = st.session_state[f'{timer_key}_cycles']
-        # The stored current time remaining when the pause button was pressed
-        # We need to manually store a 'pause offset' for this, or just use the current cycle time
-        # For simplicity, we'll store the time remaining at pause, calculated just before the pause button is clicked
+class ServerState:
+    def __init__(self):
+        # Existing counters/logs
+        self.counter = 0
+        self.logs = []
         
-        # We will use a dedicated state variable to store the 'time-in-cycle' when paused
-        time_in_cycle = st.session_state.get(f'{timer_key}_pause_offset', 0)
-        remaining_time = duration - time_in_cycle
-        percentage = time_in_cycle / duration
-        return max(0, remaining_time), percentage, cycles
+        # New: Store timers in a dictionary by ID
+        # Format: { "timer_1": TimerData object, ... }
+        self.timers = {} 
+        self._lock = threading.Lock()
 
+    # --- Existing Counter/Log Methods ---
+    def increment(self):
+        with self._lock:
+            self.counter += 1
+            self._log(f"Counter incremented to {self.counter}")
 
-    # Total time elapsed since the last absolute start time
-    elapsed_time = time.time() - start_time
+    def decrement(self):
+        with self._lock:
+            self.counter -= 1
+            self._log(f"Counter decremented to {self.counter}")
+
+    def add_message(self, user, message):
+        with self._lock:
+            self._log(f"Message from {user}: {message}")
+
+    def _log(self, message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.logs.append(f"[{timestamp}] {message}")
+        # Keep logs limited to avoid infinite growth. Increased limit for better visibility.
+        if len(self.logs) > 50:
+            self.logs.pop(0)
+
+    # --- New Timer Methods ---
+    def create_timer(self, timer_id, name, duration):
+        with self._lock:
+            if timer_id not in self.timers:
+                self.timers[timer_id] = TimerData(name, duration)
+
+    def start_timer(self, timer_id):
+        with self._lock:
+            t = self.timers.get(timer_id)
+            if t and not t.is_running:
+                # Calculate exactly when this timer will finish
+                t.end_time = datetime.now() + timedelta(seconds=t.remaining)
+                t.is_running = True
+                self._log(f"Started {t.name}")
+
+    def stop_timer(self, timer_id):
+        with self._lock:
+            t = self.timers.get(timer_id)
+            if t and t.is_running:
+                # Calculate how much time was left when stopped
+                now = datetime.now()
+                delta = (t.end_time - now).total_seconds()
+                t.remaining = max(0, delta)
+                t.is_running = False
+                t.end_time = None
+                self._log(f"Stopped {t.name}")
+
+    def reset_timer(self, timer_id):
+        with self._lock:
+            t = self.timers.get(timer_id)
+            if t:
+                t.remaining = t.total_duration
+                t.is_running = False
+                t.end_time = None
+                self._log(f"Reset {t.name}")
+
+    def update_duration(self, timer_id, new_duration):
+        with self._lock:
+            t = self.timers.get(timer_id)
+            if t:
+                t.total_duration = new_duration
+                t.remaining = new_duration
+                t.is_running = False
+                t.end_time = None
+                self._log(f"Updated {t.name} to {new_duration}s")
+
+    def update_and_get_timer(self, timer_id):
+        """
+        Calculates the current state of the timer. 
+        If expired, auto-resets it inside the lock.
+        Returns: (remaining_time, total_duration, is_running, just_finished) - ALWAYS 4 VALUES
+        """
+        with self._lock:
+            t = self.timers.get(timer_id)
+            if not t:
+                # 4 values returned
+                return 0, 100, False, False 
+            
+            if t.is_running:
+                now = datetime.now()
+                remaining = (t.end_time - now).total_seconds()
+                
+                if remaining <= 0:
+                    # Timer Reached Zero: Reset automatically
+                    t.remaining = t.total_duration
+                    t.is_running = False
+                    t.end_time = None
+                    self._log(f"{t.name} finished and reset")
+                    # 4 values returned
+                    return t.total_duration, t.total_duration, False, True 
+                else:
+                    # 4 values returned
+                    return remaining, t.total_duration, True, False # running, not finished
+            else:
+                # 4 values returned
+                return t.remaining, t.total_duration, False, False # not running, not finished
+
+# 2. Singleton Initialization
+# Renaming this function again forces Streamlit to create a new cache entry
+# and instantiate the NEW ServerState class, resolving caching issues.
+@st.cache_resource
+def get_shared_state_v4():
+    state = ServerState()
+    # Initialize some default timers if they don't exist
+    state.create_timer("t1", "Frames", 60) 
+    state.create_timer("t2", '12"', 300) 
+    state.create_timer("t3", "Plugs", 60)
+    state.create_timer("t4", "Plug Material", 60)
+    return state
+
+# 3. Main App Logic
+def main():
+    st.set_page_config(page_title="Global Shared State", layout="centered")
     
-    # Calculate time within the current cycle (this handles the looping)
-    time_in_cycle = elapsed_time % duration
+    st.title("🌐 Server-Wide Shared App")
+    st.markdown("Open multiple tabs to see these values sync in real-time.")
+
+    # Call the V4 function to get the fresh instance
+    shared_state = get_shared_state_v4()
     
-    # Calculate time remaining
-    remaining_time = duration - time_in_cycle
+    # --- Check if we need to auto-refresh (animation loop) ---
+    any_timer_running = False
     
-    # Calculate total cycles completed
-    cycles_completed = int(elapsed_time // duration)
+    # --- Section 1: Timers ---
+    st.header("⏱️ Shared Timers")
     
-    # Update session state with the calculated cycle count
-    st.session_state[f'{timer_key}_cycles'] = cycles_completed
+    timer_ids = ["t1", "t2", "t3", "t4"]
     
-    # Calculate percentage progress for the progress bar
-    percentage_completed = time_in_cycle / duration
-    
-    return max(0, remaining_time), percentage_completed, cycles_completed
+    # Create two primary columns to hold the timers side-by-side
+    col_left, col_right = st.columns(2)
 
+    for i, tid in enumerate(timer_ids):
+        # Determine the target column: t1 and t2 go left (index 0, 1), t3 and t4 go right (index 2, 3)
+        target_col = col_left if i < 2 else col_right
 
-# --- Control Functions ---
+        with target_col:
+            # Get up-to-date values (thread-safe)
+            # We now unpack four values: rem, total, running, just_finished
+            rem, total, running, just_finished = shared_state.update_and_get_timer(tid)
+            name = shared_state.timers[tid].name
+            
+            if running:
+                any_timer_running = True
+                
+            # Display the toast notification immediately when a timer finishes
+            if just_finished:
+                st.toast(f"✅ Timer '{name}' has completed and reset!", icon="🎉")
 
-def reset_timer(timer_key):
-    """Resets a single timer's absolute start time and resets its cycle count."""
-    st.session_state[f'{timer_key}_start_time'] = time.time()
-    st.session_state[f'{timer_key}_cycles'] = 0
-    st.session_state[f'{timer_key}_pause_offset'] = 0 # Clear any pause offset
-    st.rerun()
+            # Timer UI Card
+            with st.container(border=True):
+                # Inner columns for metrics/progress vs. buttons
+                c1, c2 = st.columns([3, 1]) 
+                with c1:
+                    st.subheader(f"{name}")
+                    # Format time as MM:SS
+                    mins, secs = divmod(int(rem), 60)
+                    time_str = f"{mins:02d}:{secs:02d}"
+                    # The metric delta shows the current status clearly
+                    st.metric("Time Remaining", time_str, delta="Running" if running else "Paused")
+                    
+                    # Progress Bar
+                    # Avoid division by zero if duration is 0
+                    if total > 0:
+                        progress = max(0.0, min(1.0, rem / total))
+                    else:
+                        progress = 0.0
+                    st.progress(progress)
+                    
+                    with st.expander("⚙️ Settings"):
+                        new_duration = st.number_input(
+                            "Duration (seconds)", 
+                            min_value=1, 
+                            value=int(total), 
+                            step=10, 
+                            key=f"dur_{tid}"
+                        )
+                        if st.button("Set Duration", key=f"set_{tid}", use_container_width=True):
+                            shared_state.update_duration(tid, new_duration)
+                            st.rerun()
 
-def synchronize_timers():
-    """Resets both timers to the current absolute time and resets cycle counts."""
-    now = time.time()
-    st.session_state.frame_start_time = now
-    st.session_state.twelve_start_time = now
-    st.session_state.frame_cycles = 0
-    st.session_state.twelve_cycles = 0
-    st.session_state.frame_pause_offset = 0 
-    st.session_state.twelve_pause_offset = 0
-    st.rerun()
+                with c2:
+                    st.write("##") # Spacer for alignment
+                    if running:
+                        if st.button("Stop", key=f"stop_{tid}", type="primary", use_container_width=True):
+                            shared_state.stop_timer(tid)
+                            st.rerun()
+                    else:
+                        if st.button("Start", key=f"start_{tid}", use_container_width=True):
+                            shared_state.start_timer(tid)
+                            st.rerun()
+                    
+                    # Moved Reset button down to align with the Start/Stop button
+                    if st.button("Reset", key=f"rst_{tid}", use_container_width=True):
+                        shared_state.reset_timer(tid)
+                        st.rerun()
 
-def set_duration_from_inputs(timer_key, minutes, seconds):
-    """Updates the timer duration and resets the timer start time."""
-    total_seconds = (minutes * 60) + seconds
-    if total_seconds > 0:
-        st.session_state[f'{timer_key}_duration'] = total_seconds
-        # When duration changes, reset the timer to the current absolute time
-        reset_timer(timer_key) 
-        st.toast(f"{timer_key.capitalize()} Timer duration updated and reset to {format_time(total_seconds)}!")
-    else:
-        st.warning("Duration must be greater than zero.")
+    # --- Section 2: Shared Counter (Preserved) ---
+    st.divider()
+    with st.expander("See Shared Counter & Logs"):
+        st.header("Shared Counter")
+        st.metric(label="Global Count", value=shared_state.counter)
 
-def toggle_run_state():
-    """Pauses or Resumes the timer logic by adjusting the start time."""
-    
-    current_run_state = st.session_state.is_running
-    
-    if current_run_state:
-        # User is PAUSING the timer
-        
-        # 1. Calculate how far into the cycle we currently are
-        frame_time_in_cycle = (time.time() - st.session_state.frame_start_time) % st.session_state.frame_duration
-        twelve_time_in_cycle = (time.time() - st.session_state.twelve_start_time) % st.session_state.twelve_duration
-        
-        # 2. Store this offset time
-        st.session_state.frame_pause_offset = frame_time_in_cycle
-        st.session_state.twelve_pause_offset = twelve_time_in_cycle
-        
-        st.session_state.is_running = False # Set pause flag
-        st.toast("Countdown Paused.")
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("➕ Increment"):
+                shared_state.increment()
+                st.rerun()
+        with col2:
+            if st.button("➖ Decrement"):
+                shared_state.decrement()
+                st.rerun()
+        with col3:
+            if st.button("Refresh Log"):
+                st.rerun()
 
-    else:
-        # User is RESUMING the timer
-        
-        # 1. Get the stored offset (time elapsed in the cycle when paused)
-        frame_offset = st.session_state.frame_pause_offset
-        twelve_offset = st.session_state.twelve_pause_offset
-        
-        # 2. Calculate the NEW start time: Current time minus the time already consumed in the cycle
-        st.session_state.frame_start_time = time.time() - frame_offset
-        st.session_state.twelve_start_time = time.time() - twelve_offset
-        
-        st.session_state.is_running = True # Set run flag
-        st.session_state.frame_pause_offset = 0 # Clear offsets
-        st.session_state.twelve_pause_offset = 0
-        st.toast("Countdown Resumed!")
-        
-    st.rerun()
+        st.subheader("Activity Log")
+        for log in reversed(shared_state.logs):
+            st.text(log)
 
-# --- Main Application Layout ---
+    # --- Animation Loop ---
+    # If a timer is running, we sleep briefly and rerun to update the progress bar.
+    if any_timer_running:
+        # Sleep for less than a second to ensure smooth countdown animation
+        time.sleep(0.1) 
+        st.rerun()
 
-st.set_page_config(
-    page_title="Absolute Dual Looping Timer", 
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
-st.title("Infinity Status (Absolute Time Tracking)")
-
-initialize_state()
-
-# Inject Full Screen CSS if enabled
-if st.session_state.is_fullscreen:
-    st.markdown(FULL_SCREEN_CSS, unsafe_allow_html=True)
-    
-# --- Input Section (Hidden in Full Screen) ---
-if not st.session_state.is_fullscreen:
-    st.header("1. Set Timer Durations")
-    col_input_1, col_input_2 = st.columns(2)
-
-    # Frame Timer Input
-    with col_input_1:
-        st.subheader("Frame Timer Duration")
-        current_frame_mins = int(st.session_state.frame_duration // 60)
-        current_frame_secs = int(st.session_state.frame_duration % 60)
-
-        frame_mins = st.number_input(
-            "Minutes (Frame Timer)", 
-            min_value=0, 
-            value=current_frame_mins, 
-            key="input_frame_mins"
-        )
-        frame_secs = st.number_input(
-            "Seconds (Frame Timer)", 
-            min_value=0, 
-            max_value=59, 
-            value=current_frame_secs, 
-            key="input_frame_secs"
-        )
-        if st.button("Set Frame Duration", key="set_frame_duration"):
-            set_duration_from_inputs('frame', frame_mins, frame_secs)
-
-    # 12" Timer Input
-    with col_input_2:
-        st.subheader('12" Timer Duration')
-        current_twelve_mins = int(st.session_state.twelve_duration // 60)
-        current_twelve_secs = int(st.session_state.twelve_duration % 60)
-
-        twelve_mins = st.number_input(
-            "Minutes (12\" Timer)", 
-            min_value=0, 
-            value=current_twelve_mins, 
-            key="input_twelve_mins"
-        )
-        twelve_secs = st.number_input(
-            "Seconds (12\" Timer)", 
-            min_value=0, 
-            max_value=59, 
-            value=current_twelve_secs, 
-            key="input_twelve_secs"
-        )
-        if st.button('Set 12" Duration', key="set_twelve_duration"):
-            set_duration_from_inputs('twelve', twelve_mins, twelve_secs)
-
-
-# --- Control Button Section ---
-st.header("2. Timer Controls")
-
-# Always visible controls: Full Screen and Pause/Resume
-col_always_visible_1, col_always_visible_2 = st.columns(2)
-
-with col_always_visible_1:
-    if st.button("Toggle Full Screen Mode", key="toggle_fullscreen", type="secondary"):
-        st.session_state.is_fullscreen = not st.session_state.is_fullscreen
-        st.rerun() # Use rerun to apply layout changes immediately
-
-with col_always_visible_2:
-    if st.button(f"{'Pause' if st.session_state.is_running else 'Resume'} Countdown", key="toggle_run", type="primary", on_click=toggle_run_state):
-        pass # Logic handled in on_click
-
-# Manual Reset Controls (Hidden in Full Screen)
-if not st.session_state.is_fullscreen:
-    st.markdown("---") # Separator for clarity
-    col_controls_1, col_controls_2, col_controls_3 = st.columns(3)
-
-    with col_controls_1:
-        st.button("Reset Frame Timer", on_click=lambda: reset_timer('frame'), type="secondary")
-
-    with col_controls_2:
-        st.button('Synchronize (Reset Both)', on_click=synchronize_timers, type="secondary")
-
-    with col_controls_3:
-        st.button('Reset 12" Timer', on_click=lambda: reset_timer('twelve'), type="secondary")
-
-
-# --- Display Section ---
-st.header("3. Live Countdown")
-# Use a larger column ratio in full screen mode for maximum space
-if st.session_state.is_fullscreen:
-    col_display_1, col_display_2 = st.columns([1, 1])
-else:
-    col_display_1, col_display_2 = st.columns(2)
-
-# Placeholders for Frame Timer
-frame_time_placeholder = col_display_1.empty()
-frame_count_placeholder = col_display_1.empty() 
-frame_progress_placeholder = col_display_1.empty()
-
-# Placeholders for 12" Timer
-twelve_time_placeholder = col_display_2.empty()
-twelve_count_placeholder = col_display_2.empty() 
-twelve_progress_placeholder = col_display_2.empty()
-
-
-# --- Main Countdown and Update Loop ---
-
-# Calculate the initial/current state before starting the loop
-frame_remaining, frame_percentage, frame_cycles = calculate_time_state('frame')
-twelve_remaining, twelve_percentage, twelve_cycles = calculate_time_state('twelve')
-
-# 1. Update Frame Timer UI
-frame_progress_placeholder.progress(frame_percentage, text=f"Frame Timer Progress: {format_time(frame_remaining)} remaining")
-frame_time_placeholder.metric(
-    "Frame Timer",
-    format_time(frame_remaining),
-    delta_color="off"
-)
-frame_count_placeholder.metric(
-    "Frame Cycles Completed",
-    frame_cycles
-)
-
-# 2. Update 12" Timer UI
-twelve_progress_placeholder.progress(twelve_percentage, text=f'12" Timer Progress: {format_time(twelve_remaining)} remaining')
-twelve_time_placeholder.metric(
-    '12" Timer',
-    format_time(twelve_remaining),
-    delta_color="off"
-)
-twelve_count_placeholder.metric(
-    '12" Cycles Completed',
-    twelve_cycles
-)
-
-
-if st.session_state.is_running:
-    # Use a small sleep to prevent the browser from updating too frequently,
-    # but the time calculation remains accurate even if execution is delayed.
-    time.sleep(1)
-    # The rerun forces the script to execute again, pulling the current time.
-    st.rerun()
-
-else:
-    st.warning("The countdown is currently paused.")
+if __name__ == "__main__":
+    main()
